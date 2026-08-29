@@ -1,0 +1,604 @@
+<link rel="stylesheet" href="/static/js/layui/css/layui.css">
+<script src="/static/js/layui/layui.js"></script>
+<script src="/static/js/axios.min.js"></script>
+<script src="/static/js/vue.min.js"></script>
+<script src="/static/js/jquery.2.1.4.min.js"></script>
+<script src="/static/js/quill.js"></script>
+<script src="/static/js/img-compressor.js"></script>
+<script src="/static/js/piexif.min.js"></script>
+<script src="https://wujun-netizne.github.io/admin_common_function_new.js"></script>
+<link rel="stylesheet" href="/static/css/kft/common.css?v=<?php echo time();?>">
+<link rel="stylesheet" href="/static/js/quill.snow.css">
+<script>
+    /**
+     * 弹出图片预览（支持鼠标拖拽平移 + 滚轮缩放）
+     * @param {string} imgUrl 图片地址
+     * @param {string} title 弹窗标题
+     * @param {object} options 可选配置 { minScale, maxScale, step, initialScale, area }
+     */
+    function previewImageWithDragZoom(imgUrl, title = '图片预览，可通过鼠标拖拽和滚轮缩放', options = {}) {
+        const defaults = {
+            minScale: 0.1,
+            maxScale: 5,
+            step: 0.1,
+            area: ['95vw', '95vh']
+        };
+        const cfg = Object.assign({}, defaults, options);
+
+        let scale = 1;
+        let translateX = 0, translateY = 0;   // translateY 仅用于用户拖拽偏移，但双击重置后为 0
+        let isDragging = false;
+        let startPointerX, startPointerY, startTranslateX, startTranslateY;
+        let resizeObserver = null;
+
+        const contentHtml = `
+        <div id="ps-preview-container" style="width:100%; height:100%; overflow:hidden; background:#1e1e1e; cursor:grab; position:relative;">
+            <img id="ps-preview-img" src="${imgUrl}" style="display:block; transform-origin:0 0; user-select:none; pointer-events:none; position:absolute; top:0; left:0;" />
+        </div>
+    `;
+
+        layer.open({
+            type: 1,
+            title: title,
+            area: cfg.area,
+            shadeClose: true,
+            closeBtn: 1,
+            resize: true,
+            content: contentHtml,
+            success: (layero, index) => {
+                const container = document.getElementById('ps-preview-container');
+                const img = document.getElementById('ps-preview-img');
+
+                function updateTransform() {
+                    img.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+                }
+
+                // 强制图片高度等于容器高度 + 水平居中，顶部对齐（translateY 归零）
+                function enforceHeightFill() {
+                    const containerRect = container.getBoundingClientRect();
+                    const imgNaturalHeight = img.naturalHeight;
+                    if (!imgNaturalHeight || containerRect.height === 0) {
+                        setTimeout(enforceHeightFill, 50);
+                        return;
+                    }
+
+                    // 精确计算：使图片高度 = 容器高度
+                    let newScale = containerRect.height / imgNaturalHeight;
+                    newScale = Math.min(cfg.maxScale, Math.max(cfg.minScale, newScale));
+                    scale = newScale;
+
+                    // 水平居中
+                    const imgWidth = img.naturalWidth * scale;
+                    translateX = (containerRect.width - imgWidth) / 2;
+                    // 垂直方向强制顶部对齐，清除用户拖拽产生的垂直偏移
+                    translateY = 0;
+
+                    updateTransform();
+
+                    // 额外校准：由于浮点计算误差，有时图片渲染高度与容器高度存在微小偏差
+                    requestAnimationFrame(() => {
+                        const actualImgRect = img.getBoundingClientRect();
+                        const containerRectNow = container.getBoundingClientRect();
+                        const diff = Math.abs(actualImgRect.height - containerRectNow.height);
+                        if (diff > 0.5) {  // 偏差超过0.5像素，微调scale
+                            const correction = containerRectNow.height / actualImgRect.height;
+                            let newScale2 = scale * correction;
+                            newScale2 = Math.min(cfg.maxScale, Math.max(cfg.minScale, newScale2));
+                            if (Math.abs(newScale2 - scale) > 0.001) {
+                                scale = newScale2;
+                                const imgWidth2 = img.naturalWidth * scale;
+                                translateX = (containerRectNow.width - imgWidth2) / 2;
+                                translateY = 0;
+                                updateTransform();
+                            }
+                        }
+                    });
+                }
+
+                // 水平边界限制（垂直方向不做任何限制，因为我们要始终顶部对齐且高度铺满）
+                function clampTranslateX() {
+                    const containerRect = container.getBoundingClientRect();
+                    const imgWidth = img.naturalWidth * scale;
+                    const minTx = Math.min(0, containerRect.width - imgWidth);
+                    const maxTx = Math.max(0, containerRect.width - imgWidth);
+                    translateX = Math.min(maxTx, Math.max(minTx, translateX));
+                    updateTransform();
+                }
+
+                // 图片加载完成后立即铺满高度
+                img.onload = enforceHeightFill;
+                if (img.complete) enforceHeightFill();
+
+                // 监听容器大小变化（弹窗缩放、窗口 resize）
+                if (window.ResizeObserver) {
+                    resizeObserver = new ResizeObserver(() => enforceHeightFill());
+                    resizeObserver.observe(container);
+                } else {
+                    window.addEventListener('resize', enforceHeightFill);
+                }
+
+                // 拖拽逻辑（仅水平拖拽，垂直拖拽被禁止，因为要保持顶部对齐）
+                let isPointerDown = false;
+                const onPointerDown = (e) => {
+                    isPointerDown = true;
+                    container.style.cursor = 'grabbing';
+                    startPointerX = e.clientX;
+                    startPointerY = e.clientY;
+                    startTranslateX = translateX;
+                    startTranslateY = translateY;
+                    container.setPointerCapture(e.pointerId);
+                    e.preventDefault();
+                };
+
+                const onPointerMove = (e) => {
+                    if (!isPointerDown) return;
+                    const dx = e.clientX - startPointerX;
+                    const dy = e.clientY - startPointerY;
+                    translateX = startTranslateX + dx;
+                    // 垂直方向：允许用户临时上下拖拽，但限制范围使其不能导致容器露底
+                    let tempTranslateY = startTranslateY + dy;
+                    const containerRect = container.getBoundingClientRect();
+                    const imgHeight = img.naturalHeight * scale;
+                    // 垂直方向允许拖拽范围为 [containerRect.height - imgHeight, 0]
+                    const minTy = Math.min(0, containerRect.height - imgHeight);
+                    const maxTy = Math.max(0, containerRect.height - imgHeight);
+                    translateY = Math.min(maxTy, Math.max(minTy, tempTranslateY));
+                    clampTranslateX();
+                };
+
+                const onPointerUp = (e) => {
+                    isPointerDown = false;
+                    container.style.cursor = 'grab';
+                    container.releasePointerCapture?.(e.pointerId);
+                };
+
+                // 滚轮缩放（以鼠标为中心，缩放后自动维持垂直顶部对齐）
+                const onWheel = (e) => {
+                    e.preventDefault();
+                    const delta = e.deltaY > 0 ? -cfg.step : cfg.step;
+                    let newScale = scale + delta;
+                    newScale = Math.min(cfg.maxScale, Math.max(cfg.minScale, newScale));
+                    if (newScale === scale) return;
+
+                    const rect = img.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    const ratioX = mouseX / rect.width;
+                    const ratioY = mouseY / rect.height;
+
+                    const oldWidth = img.naturalWidth * scale;
+                    const oldHeight = img.naturalHeight * scale;
+                    const newWidth = img.naturalWidth * newScale;
+                    const newHeight = img.naturalHeight * newScale;
+
+                    const deltaX = (newWidth - oldWidth) * ratioX;
+                    const deltaY = (newHeight - oldHeight) * ratioY;
+
+                    scale = newScale;
+                    translateX -= deltaX;
+                    // 缩放后，保持鼠标下垂直位置不变，但之后强制顶部对齐？不，我们应采用用户预期：缩放后图片应仍然保持相对于鼠标的纵向位置不变。
+                    // 为了不破坏“高度铺满”的初衷，这里不对 translateY 做额外限制，允许用户缩放后图片上下偏移。
+                    // 但如果用户缩放后图片高度小于容器高度，我们希望图片顶部对齐（即 translateY = 0）？
+                    // 根据常见预览器行为，缩放后应该维持鼠标下的点不动，因此保留原有 translateY 计算。
+                    translateY -= deltaY;
+                    // 边界限制（水平和垂直）
+                    const containerRect = container.getBoundingClientRect();
+                    const imgWidth = img.naturalWidth * scale;
+                    const imgHeight = img.naturalHeight * scale;
+                    // 水平边界
+                    const minTx = Math.min(0, containerRect.width - imgWidth);
+                    const maxTx = Math.max(0, containerRect.width - imgWidth);
+                    translateX = Math.min(maxTx, Math.max(minTx, translateX));
+                    // 垂直边界
+                    const minTy = Math.min(0, containerRect.height - imgHeight);
+                    const maxTy = Math.max(0, containerRect.height - imgHeight);
+                    translateY = Math.min(maxTy, Math.max(minTy, translateY));
+
+                    updateTransform();
+                };
+
+                // 双击重置：恢复高度完全铺满，顶部对齐，水平居中
+                container.addEventListener('dblclick', () => {
+                    enforceHeightFill();
+                });
+
+                container.addEventListener('pointerdown', onPointerDown);
+                container.addEventListener('pointermove', onPointerMove);
+                container.addEventListener('pointerup', onPointerUp);
+                container.addEventListener('wheel', onWheel, { passive: false });
+
+                $(layero).on('layer-destroy', () => {
+                    container.removeEventListener('pointerdown', onPointerDown);
+                    container.removeEventListener('pointermove', onPointerMove);
+                    container.removeEventListener('pointerup', onPointerUp);
+                    container.removeEventListener('wheel', onWheel);
+                    if (resizeObserver) {
+                        resizeObserver.disconnect();
+                        resizeObserver = null;
+                    } else {
+                        window.removeEventListener('resize', enforceHeightFill);
+                    }
+                });
+            }
+        });
+    }
+    function previewImageWithDragZoom2(imgUrl, title = '图片预览，可通过鼠标拖拽和滚轮缩放', options = {}) {
+        const defaults = {
+            minScale: 0.1,
+            maxScale: 5,
+            step: 0.1,
+            initialScale: 0.1,
+            area: ['95vw', '95vh']
+        };
+        const cfg = Object.assign({}, defaults, options);
+
+        let scale = cfg.initialScale;          // 当前缩放系数
+        let translateX = 0, translateY = 0;    // 平移偏移量（像素）
+        let isDragging = false;
+        let dragStartX = 0, dragStartY = 0;
+        let lastTranslateX = 0, lastTranslateY = 0;
+
+        // 构建DOM结构：外层容器负责裁剪，内层img负责移动和缩放
+        const contentHtml = `
+        <div id="ps-preview-container" style="width:100%; height:100%; overflow:hidden; background:#1e1e1e; cursor:grab; position:relative;">
+            <img id="ps-preview-img" src="${imgUrl}" style="display:block; transform-origin:0 0; user-select:none; pointer-events:none; position:absolute; top:0; left:0;" />
+        </div>
+    `;
+
+        layer.open({
+            type: 1,
+            title: title,
+            area: cfg.area,
+            shadeClose: true,
+            closeBtn: 1,
+            resize: true,
+            content: contentHtml,
+            success: (layero, index) => {
+                const container = document.getElementById('ps-preview-container');
+                const img = document.getElementById('ps-preview-img');
+
+                // 等待图片加载完成，获取原始尺寸
+                img.onload = () => {
+                    updateTransform();
+                    // 初始居中显示
+                    centerImage();
+                };
+                if (img.complete) {
+                    updateTransform();
+                    centerImage();
+                }
+
+                // 更新图片变换（缩放 + 平移）
+                function updateTransform() {
+                    img.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+                }
+
+                // 水平垂直居中（基于当前缩放）
+                function centerImage() {
+                    const containerRect = container.getBoundingClientRect();
+                    const imgWidth = img.naturalWidth * scale;
+                    const imgHeight = img.naturalHeight * scale;
+                    translateX = (containerRect.width - imgWidth) / 2;
+                    translateY = (containerRect.height - imgHeight) / 2;
+                    updateTransform();
+                }
+
+                // 限制平移范围（防止拖出边界）
+                function clampTranslate() {
+                    const containerRect = container.getBoundingClientRect();
+                    const imgWidth = img.naturalWidth * scale;
+                    const imgHeight = img.naturalHeight * scale;
+                    const maxX = Math.max(0, imgWidth - containerRect.width);
+                    const maxY = Math.max(0, imgHeight - containerRect.height);
+                    translateX = Math.min(maxX, Math.max(-maxX, translateX));
+                    translateY = Math.min(maxY, Math.max(-maxY, translateY));
+                    updateTransform();
+                }
+
+                // 鼠标/指针事件：实现拖拽平移
+                let isPointerDown = false;
+                let startPointerX, startPointerY;
+                let startTranslateX, startTranslateY;
+
+                const onPointerDown = (e) => {
+                    isPointerDown = true;
+                    container.style.cursor = 'grabbing';
+                    startPointerX = e.clientX;
+                    startPointerY = e.clientY;
+                    startTranslateX = translateX;
+                    startTranslateY = translateY;
+                    container.setPointerCapture(e.pointerId);
+                    e.preventDefault();
+                };
+
+                const onPointerMove = (e) => {
+                    if (!isPointerDown) return;
+                    const dx = e.clientX - startPointerX;
+                    const dy = e.clientY - startPointerY;
+                    translateX = startTranslateX + dx;
+                    translateY = startTranslateY + dy;
+                    clampTranslate();
+                };
+
+                const onPointerUp = (e) => {
+                    isPointerDown = false;
+                    container.style.cursor = 'grab';
+                    container.releasePointerCapture?.(e.pointerId);
+                };
+
+                // 滚轮缩放（以鼠标位置为中心）
+                const onWheel = (e) => {
+                    e.preventDefault();
+                    const delta = e.deltaY > 0 ? -cfg.step : cfg.step;
+                    let newScale = scale + delta;
+                    newScale = Math.min(cfg.maxScale, Math.max(cfg.minScale, newScale));
+                    if (newScale === scale) return;
+
+                    // 获取鼠标在图片上的相对坐标（未缩放前的比例）
+                    const rect = img.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    // 计算鼠标位置在图片实际内容中的比例（0~1）
+                    const ratioX = mouseX / rect.width;
+                    const ratioY = mouseY / rect.height;
+
+                    // 计算缩放后图片的新尺寸
+                    const oldWidth = img.naturalWidth * scale;
+                    const oldHeight = img.naturalHeight * scale;
+                    const newWidth = img.naturalWidth * newScale;
+                    const newHeight = img.naturalHeight * newScale;
+
+                    // 计算需要额外平移的量，使鼠标点下的位置保持不变
+                    const deltaX = (newWidth - oldWidth) * ratioX;
+                    const deltaY = (newHeight - oldHeight) * ratioY;
+
+                    scale = newScale;
+                    translateX -= deltaX;
+                    translateY -= deltaY;
+                    clampTranslate();
+                    updateTransform();
+                };
+
+                // 绑定事件
+                container.addEventListener('pointerdown', onPointerDown);
+                container.addEventListener('pointermove', onPointerMove);
+                container.addEventListener('pointerup', onPointerUp);
+                container.addEventListener('wheel', onWheel, { passive: false });
+
+                // 可选：双击重置缩放和位置
+                container.addEventListener('dblclick', () => {
+                    scale = cfg.initialScale;
+                    centerImage();
+                });
+
+                // 弹窗关闭时清理事件（避免内存泄漏）
+                $(layero).on('layer-destroy', () => {
+                    container.removeEventListener('pointerdown', onPointerDown);
+                    container.removeEventListener('pointermove', onPointerMove);
+                    container.removeEventListener('pointerup', onPointerUp);
+                    container.removeEventListener('wheel', onWheel);
+                });
+            }
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        // 事件委托：给表格绑定一次，所有图片永久生效
+        document.querySelector('table.form-table')?.addEventListener('click', (e) => {
+            if (e.target.tagName === 'IMG') {
+                previewImageWithDragZoom(e.target.src);
+            }
+        });
+    });
+
+    // document.addEventListener('DOMContentLoaded', () => {
+    //     setTimeout(()=>{
+    //         document.querySelectorAll('table.form-table img').forEach(img => {
+    //             img.onclick = () => previewImageWithDragZoom(img.src);
+    //         });
+    //     },800)
+    // });
+
+    /**
+     * 全局事件委托：为所有 id="search" 容器内的输入框添加回车触发 .submit 点击
+     * 特性：
+     * - 自动处理动态添加的 #search 容器
+     * - 仅对文本类输入框有效（排除按钮、复选框等）
+     * - 阻止原生表单提交，避免重复提交
+     * - 兼容传统 keyCode 和现代 key 属性
+     */
+    // (function() {
+    //     // 需要排除的 input 类型（这些类型不应该通过回车触发提交）
+    //     const EXCLUDED_INPUT_TYPES = /button|submit|reset|checkbox|radio|file|image/i;
+    //
+    //     // 判断是否为回车键（兼容旧浏览器）
+    //     function isEnterKey(event) {
+    //         return event.key === 'Enter' || event.keyCode === 13;
+    //     }
+    //
+    //     // 判断目标元素是否为可输入的文本类 input
+    //     function isTextInput(element) {
+    //         if (!element || element.tagName !== 'INPUT') return false;
+    //         const inputType = element.type;
+    //         return !EXCLUDED_INPUT_TYPES.test(inputType);
+    //     }
+    //
+    //     // 【iframe 专用】判断当前页面是否是 smdb 或 smfh
+    //     function isExcludedPage() {
+    //         const href = window.location.href;
+    //         // 匹配路径里包含 smdb 或 smfh 的页面（Hisiphp iframe 专用）
+    //         return /smdb|smfh/i.test(href);
+    //     }
+    //
+    //     // 主事件处理函数
+    //     function onKeydown(event) {
+    //         // 【关键】如果是 smdb / smfh 页面，直接不执行
+    //         if (isExcludedPage()) return;
+    //
+    //         // 1. 检查是否按下回车键
+    //         if (!isEnterKey(event)) return;
+    //
+    //         const target = event.target;
+    //
+    //         // 2. 检查目标是否为可输入的文本类 input
+    //         if (!isTextInput(target)) return;
+    //
+    //         // 3. 忽略输入法组合中的回车（避免过早提交）
+    //         if (event.isComposing) return;
+    //
+    //         // 4. 向上查找最近的 id="search" 容器
+    //         const searchContainer = target.closest('#search');
+    //         if (!searchContainer) return;
+    //
+    //         // 5. 在容器内查找 .submit 元素
+    //         const submitButton = searchContainer.querySelector('.submit');
+    //         if (!submitButton) return;
+    //
+    //         // 6. 阻止原生默认行为
+    //         event.preventDefault();
+    //
+    //         // 7. 触发提交按钮点击
+    //         submitButton.click();
+    //     }
+    //
+    //     // 绑定全局事件
+    //     document.addEventListener('keydown', onKeydown);
+    // })();
+</script>
+<style>
+    #search2 {
+        display: flex;
+        flex-wrap: wrap;
+        flex-shrink:1;
+    }
+    .layui-tab-card>.layui-tab-title .layui-this{
+        background: black;
+    }
+    .layui-form-item{margin-top: 8px;}
+
+    /*.layui-table-cell {*/
+    /*    display: flex !important;*/
+    /*    align-items: center !important;*/
+    /*    height: 100% !important;*/
+    /*}*/
+
+    /*包条统一样式*/
+    #barcode-label {
+        width: 5669px;
+        height: 267px;
+        background: #dc3545;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px;
+        margin: 0 auto;
+        border: solid 5px black;
+    }
+    .qrcode {
+        width: 220px;
+        height: 220px;
+    }
+    .qrcode img{
+        width: 100%;
+        height: 100%;
+        object-fit: cover; /* 确保图片填满容器 */
+    }
+    /* 中间文字区：横向、2列 */
+    .content-area {
+        display: flex;
+        padding: 0 15px;
+        font-size: 22px;
+        font-weight: bold;
+        align-items: center!important;
+        height: 250px;
+    }
+
+    /* 整体布局容器 */
+    .label-main-row {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* 信息文字组（名称、款名、备注等） */
+    .info-group {
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        font-size: 25px;
+        margin: 0 25px;
+    }
+
+    /* 中间大区域 */
+    .center-area {
+        flex: 1;
+        display: flex;
+        align-items: center;
+    }
+
+    /* 大字样式（款名/备注） */
+    .big-text {
+        font-size: 65px;
+        font-weight: bold;
+        margin: 0 25px;
+    }
+
+    /* 右对齐的大字 */
+    .big-text-right {
+        flex: 1;
+        font-size: 65px;
+        font-weight: bold;
+        margin: 0 25px;
+        text-align: right;
+    }
+
+    /* 中间子区域（包含二维码、两个 up 图标） */
+    .sub-center {
+        flex: 1;
+        display: flex;
+        align-items: center;
+    }
+
+    /* 右侧对齐容器 */
+    .right-align {
+        flex: 1;
+        display: flex;
+        justify-content: right;
+    }
+
+    /* 二维码两侧图标容器 */
+    .qr-icon-left {
+        flex: 1;
+    }
+
+    .qr-icon-right {
+        flex: 1;
+        display: flex;
+        justify-content: right;
+    }
+
+    /* 中间二维码图片统一高度 */
+    .qr-img-middle {
+        height: 220px;
+    }
+
+    /* 另一个 flex 容器 */
+    .flex-one {
+        flex: 1;
+        display: flex;
+    }
+
+    html,body {
+        padding: 0px !important;
+        margin: 0px!important;
+        background-color: #f5f5f5;
+    }
+    .container {
+        margin: 0 auto;
+        background: #fff;
+        border-radius: 8px;
+        padding: 0!important;
+        width: 100%;
+    }
+</style>
