@@ -1,4 +1,3 @@
-_12456-//safsdfasfasf;
 async function C_Request(args = {url, method, params}) {
     let config = Object.assign({method: "get", params: {}}, args)
     let result = null
